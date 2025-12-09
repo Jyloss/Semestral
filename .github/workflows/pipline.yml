@@ -1,27 +1,72 @@
-name: Deploy WordPress
+name: CI/CD WordPress EC2
 
 on:
   push:
-    branches: [ "main" ]
+    branches: ["main"]
+  pull_request:
 
 jobs:
+  # ---- 1. Static Security / Code Quality ----
+  security-checks:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Scan Dockerfile & Compose for security issues
+      uses: aquasecurity/trivy-action@master
+      with:
+        scan-type: "config"
+        severity: "HIGH,CRITICAL"
+
+    - name: Scan dependencies (composer, npm, etc)
+      uses: actions/dependency-review-action@v4
+
+  # ---- 2. Deploy to EC2 ----
   deploy:
-    runs-on: self-hosted
+    needs: security-checks
+    runs-on: ubuntu-latest
 
     steps:
-    - name: Checkout repo
-      uses: actions/checkout@v4            
+    - name: Checkout code
+      uses: actions/checkout@v4
 
-    - name: Stop existing containers
-      run: docker-compose down || true
+    - name: Connect via SSH and Deploy to EC2
+      uses: appleboy/ssh-action@v1.2.0
+      with:
+        host: ${{ secrets.EC2_HOST }}
+        username: ${{ secrets.EC2_USER }}
+        key: ${{ secrets.EC2_SSH_KEY }}
+        port: ${{ secrets.EC2_PORT }}
+        script_stop: true
+        script: |
+          set -e
 
-    - name: Pull updated images
-      run: docker-compose pull
+          echo ">>> Entrando al directorio del proyecto"
+          cd /home/ubuntu
 
-    - name: Start updated containers
-      run: docker-compose up -d
+          echo ">>> Sacando copia para rollback"
+          docker compose export > backup_$(date +%F-%H-%M).tar || true
 
-    - name: Test service health
-      run: |
-        sleep 10
-        curl -I http://localhost:2000 || exit 1
+          echo ">>> Haciendo git pull"
+          git pull origin main
+
+          echo ">>> Bajando nuevas imágenes de WordPress"
+          docker compose pull
+
+          echo ">>> Levantando stack"
+          docker compose up -d --build
+
+          echo ">>> Limpiando contenedores viejos"
+          docker system prune -f
+
+    - name: (Opcional) Notificar éxito del despliegue
+      uses: slackapi/slack-github-action@v1.24.0
+      if: always()
+      with:
+        payload: |
+          {
+            "text": "🚀 *Deploy completado* en EC2 para WordPress."
+          }
+      env:
+        SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
