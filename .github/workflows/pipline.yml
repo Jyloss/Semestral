@@ -12,9 +12,6 @@ jobs:
     - name: Checkout repo
       uses: actions/checkout@v4            
 
-    - name: Docker login (optional if using private images)
-      run: echo "$DOCKER_PASSWORD" | docker login -u "$DOCKER_USERNAME" --password-stdin
-
     - name: Stop existing containers
       run: docker-compose down || true
 
