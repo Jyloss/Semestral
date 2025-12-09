@@ -52,10 +52,10 @@ jobs:
           git pull origin main
 
           echo ">>> Bajando nuevas imágenes de WordPress"
-          docker compose pull
+          docker-compose pull
 
           echo ">>> Levantando stack"
-          docker compose up -d --build
+          docker-compose up -d --build
 
           echo ">>> Limpiando contenedores viejos"
           docker system prune -f
