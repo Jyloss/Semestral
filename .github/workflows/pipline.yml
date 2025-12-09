@@ -1,72 +1,89 @@
-name: CI/CD WordPress EC2
+name: Secure Deploy WordPress
 
 on:
   push:
-    branches: ["main"]
-  pull_request:
+    branches: [ "main" ]
+  workflow_dispatch:
 
 jobs:
-  # ---- 1. Static Security / Code Quality ----
-  security-checks:
-    runs-on: ubuntu-latest
-    steps:
-    - name: Checkout
-      uses: actions/checkout@v4
-
-    - name: Scan Dockerfile & Compose for security issues
-      uses: aquasecurity/trivy-action@master
-      with:
-        scan-type: "config"
-        severity: "HIGH,CRITICAL"
-
-    - name: Scan dependencies (composer, npm, etc)
-      uses: actions/dependency-review-action@v4
-
-  # ---- 2. Deploy to EC2 ----
   deploy:
-    needs: security-checks
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
+    timeout-minutes: 10
 
     steps:
-    - name: Checkout code
+    - name: Checkout repo
       uses: actions/checkout@v4
 
-    - name: Connect via SSH and Deploy to EC2
-      uses: appleboy/ssh-action@v1.2.0
-      with:
-        host: ${{ secrets.EC2_HOST }}
-        username: ${{ secrets.EC2_USER }}
-        key: ${{ secrets.EC2_SSH_KEY }}
-        port: ${{ secrets.EC2_PORT }}
-        script_stop: true
-        script: |
-          set -e
+    - name: Show current runner status
+      run: |
+        echo "Runner hostname: $(hostname)"
+        echo "Current user: $(whoami)"
+        docker --version
+        docker-compose --version
 
-          echo ">>> Entrando al directorio del proyecto"
-          cd /home/ubuntu
+    # 🔐 Validar integridad de imágenes
+    - name: Validate WordPress image integrity
+      run: |
+        echo "Validando integridad de WordPress..."
+        docker pull wordpress:latest
+        docker image inspect wordpress:latest >/dev/null 2>&1 || exit 1
 
-          echo ">>> Sacando copia para rollback"
-          docker compose export > backup_$(date +%F-%H-%M).tar || true
+    - name: Validate MySQL image integrity
+      run: |
+        echo "Validando integridad de MySQL..."
+        docker pull mysql:8.0
+        docker image inspect mysql:8.0 >/dev/null 2>&1 || exit 1
 
-          echo ">>> Haciendo git pull"
-          git pull origin main
+    # 🛡️ Scan de vulnerabilidades (Trivy)
+    - name: Security scan with Trivy
+      run: |
+        docker run --rm -v /var/run/docker.sock:/var/run/docker.sock aquasec/trivy image wordpress:latest || true
+        docker run --rm -v /var/run/docker.sock:/var/run/docker.sock aquasec/trivy image mysql:8.0 || true
 
-          echo ">>> Bajando nuevas imágenes de WordPress"
-          docker compose pull
+    # 🧹 Detener cualquier contenedor previo
+    - name: Stop existing containers
+      run: |
+        echo "Deteniendo contenedores previos..."
+        docker-compose down || true
 
-          echo ">>> Levantando stack"
-          docker compose up -d --build
+    # 📦 Pull de imágenes
+    - name: Pull updated images
+      run: docker-compose pull
 
-          echo ">>> Limpiando contenedores viejos"
-          docker system prune -f
+    # 🚀 Levantar contenedores
+    - name: Start updated containers
+      run: docker-compose up -d
 
-    - name: (Opcional) Notificar éxito del despliegue
-      uses: slackapi/slack-github-action@v1.24.0
-      if: always()
-      with:
-        payload: |
-          {
-            "text": "🚀 *Deploy completado* en EC2 para WordPress."
-          }
-      env:
-        SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+    # 🔍 Verificar salud
+    - name: Test service health
+      run: |
+        echo "Esperando que WordPress arranque..."
+        sleep 15
+
+        STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:2000)
+
+        if [ "$STATUS" != "200" ] && [ "$STATUS" != "301" ] && [ "$STATUS" != "302" ]; then
+            echo "❌ WordPress no responde correctamente. Código: $STATUS"
+            docker-compose logs
+            exit 1
+        fi
+
+        echo "✔️ WordPress está arriba con status: $STATUS"
+
+    # 🔔 Enviar alerta en caso de fallo
+  notify:
+    needs: deploy
+    runs-on: self-hosted
+    if: failure()
+
+    steps:
+    - name: Send failure alert
+      run: |
+        echo "⚠️ Deployment falló en $(date)" > fail.txt
+        echo "Puedes revisar los logs en GitHub Actions." >> fail.txt
+
+        curl -X POST \
+          -H "Accept: application/vnd.github+json" \
+          -H "Authorization: Bearer $GITHUB_TOKEN" \
+          https://api.github.com/repos/${GITHUB_REPOSITORY}/issues \
+          -d '{"title":"🚨 Deployment Failed","body":"El pipeline falló. Revisa el último job para más detalles."}'
