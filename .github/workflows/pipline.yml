@@ -3,7 +3,6 @@ name: Secure Deploy WordPress
 on:
   push:
     branches: [ "main" ]
-  workflow_dispatch:
 
 jobs:
   deploy:
@@ -14,76 +13,64 @@ jobs:
     - name: Checkout repo
       uses: actions/checkout@v4
 
-    - name: Show current runner status
-      run: |
-        echo "Runner hostname: $(hostname)"
-        echo "Current user: $(whoami)"
-        docker --version
-        docker-compose --version
+    - name: Prepare log directory
+      run: mkdir -p /home/ubuntu/pipeline-logs/history
 
-    # 🔐 Validar integridad de imágenes
-    - name: Validate WordPress image integrity
+    - name: Start deployment log
       run: |
-        echo "Validando integridad de WordPress..."
-        docker pull wordpress:latest
-        docker image inspect wordpress:latest >/dev/null 2>&1 || exit 1
+        LOGFILE="/home/ubuntu/pipeline-logs/history/deploy-$(date +"%Y%m%d-%H%M%S").log"
+        echo "Deploy iniciado en: $(date)" | tee -a "$LOGFILE"
+        echo "Commit: $GITHUB_SHA" | tee -a "$LOGFILE"
+        echo "Runner: $(hostname)" | tee -a "$LOGFILE"
+        echo "====================================" | tee -a "$LOGFILE"
+        echo "$LOGFILE" > /home/ubuntu/pipeline-logs/current_log
+      id: startlog
 
-    - name: Validate MySQL image integrity
-      run: |
-        echo "Validando integridad de MySQL..."
-        docker pull mysql:8.0
-        docker image inspect mysql:8.0 >/dev/null 2>&1 || exit 1
+    - name: Load log path
+      run: echo "LOGFILE=$(cat /home/ubuntu/pipeline-logs/current_log)" >> $GITHUB_ENV
 
-    # 🛡️ Scan de vulnerabilidades (Trivy)
-    - name: Security scan with Trivy
+    - name: Stop containers
       run: |
-        docker run --rm -v /var/run/docker.sock:/var/run/docker.sock aquasec/trivy image wordpress:latest || true
-        docker run --rm -v /var/run/docker.sock:/var/run/docker.sock aquasec/trivy image mysql:8.0 || true
-
-    # 🧹 Detener cualquier contenedor previo
-    - name: Stop existing containers
-      run: |
-        echo "Deteniendo contenedores previos..."
         docker-compose down || true
+        echo "[INFO] Contenedores detenidos" | tee -a "$LOGFILE"
 
-    # 📦 Pull de imágenes
-    - name: Pull updated images
-      run: docker-compose pull
-
-    # 🚀 Levantar contenedores
-    - name: Start updated containers
-      run: docker-compose up -d
-
-    # 🔍 Verificar salud
-    - name: Test service health
+    - name: Pull images
       run: |
-        echo "Esperando que WordPress arranque..."
-        sleep 15
+        docker-compose pull
+        echo "[INFO] Imágenes actualizadas" | tee -a "$LOGFILE"
 
+    - name: Start containers
+      run: |
+        docker-compose up -d
+        echo "[INFO] Nuevos contenedores levantados" | tee -a "$LOGFILE"
+
+    - name: Health check
+      run: |
+        echo "[INFO] Esperando WordPress..." | tee -a "$LOGFILE"
+        sleep 15
         STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:2000)
 
+        echo "[INFO] HTTP Status: $STATUS" | tee -a "$LOGFILE"
+
         if [ "$STATUS" != "200" ] && [ "$STATUS" != "301" ] && [ "$STATUS" != "302" ]; then
-            echo "❌ WordPress no responde correctamente. Código: $STATUS"
-            docker-compose logs
+            echo "[ERROR] WordPress no levantó correctamente" | tee -a "$LOGFILE"
+            docker-compose logs | tee -a "$LOGFILE"
             exit 1
         fi
 
-        echo "✔️ WordPress está arriba con status: $STATUS"
+        echo "[OK] WordPress funcionando correctamente" | tee -a "$LOGFILE"
 
-    # 🔔 Enviar alerta en caso de fallo
-  notify:
-    needs: deploy
-    runs-on: self-hosted
-    if: failure()
-
-    steps:
-    - name: Send failure alert
+    - name: Mark success log
+      if: success()
       run: |
-        echo "⚠️ Deployment falló en $(date)" > fail.txt
-        echo "Puedes revisar los logs en GitHub Actions." >> fail.txt
+        LOGFILE=$(cat /home/ubuntu/pipeline-logs/current_log)
+        cp "$LOGFILE" /home/ubuntu/pipeline-logs/last-success.log
+        echo "[OK] Deploy exitoso: $(date)" | tee -a "$LOGFILE"
+        rm -f /home/ubuntu/pipeline-logs/last-failure.log
 
-        curl -X POST \
-          -H "Accept: application/vnd.github+json" \
-          -H "Authorization: Bearer $GITHUB_TOKEN" \
-          https://api.github.com/repos/${GITHUB_REPOSITORY}/issues \
-          -d '{"title":"🚨 Deployment Failed","body":"El pipeline falló. Revisa el último job para más detalles."}'
+    - name: Mark failure log
+      if: failure()
+      run: |
+        LOGFILE=$(cat /home/ubuntu/pipeline-logs/current_log)
+        cp "$LOGFILE" /home/ubuntu/pipeline-logs/last-failure.log
+        echo "[FAIL] Deploy falló: $(date)" | tee -a "$LOGFILE"
