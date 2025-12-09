@@ -43,7 +43,7 @@ jobs:
           set -e
 
           echo ">>> Entrando al directorio del proyecto"
-          cd /home/ubuntu
+          cd /home/ubuntu/Semestral
 
           echo ">>> Sacando copia para rollback"
           docker compose export > backup_$(date +%F-%H-%M).tar || true
